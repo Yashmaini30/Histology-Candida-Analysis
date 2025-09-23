@@ -1,0 +1,165 @@
+import os
+import cv2
+import yaml
+import numpy as np
+from skimage import morphology
+from skimage.measure import find_contours
+import matplotlib.pyplot as plt
+import pandas as pd
+
+def load_config(config_path="config.yaml"):
+    """Loads configuration from a YAML file."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.join(script_dir, '..')
+    config_full_path = os.path.join(project_root, config_path)
+    if not os.path.exists(config_full_path):
+        raise FileNotFoundError(f"Config file not found at {config_full_path}")
+    with open(config_full_path, 'r') as file:
+        return yaml.safe_load(file)
+
+def get_image_paths(root_dir):
+    """Lists and verifies all image files in the specified directory."""
+    image_paths = []
+    supported_formats = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.jp2')
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.join(script_dir, '..')
+    data_root_full_path = os.path.join(project_root, root_dir)
+    
+    for dirpath, _, filenames in os.walk(data_root_full_path):
+        for filename in filenames:
+            if filename.lower().endswith(supported_formats):
+                full_path = os.path.join(dirpath, filename)
+                try:
+                    img = cv2.imread(full_path)
+                    if img is not None:
+                        image_paths.append(full_path)
+                except Exception as e:
+                    print(f"Error reading {full_path}: {e}")
+    return image_paths
+
+def color_segmentation(image):
+    """
+    Performs color-based segmentation to find dark, reddish/purplish regions.
+    Returns a binary mask.
+    """
+    # Convert to HSV color space
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    
+    # Refined range for Candida based on your image
+    # Note: Hue (H) is adjusted to a narrower band around the specific purple of the hyphae
+    # Saturation (S) is increased to ignore lighter, less-stained areas
+    # Value (V) is adjusted to capture the darker elements
+    lower_purple = np.array([130, 100, 20])  # Tighter H and higher S, lower V to capture dark areas
+    upper_purple = np.array([160, 255, 150]) # Tighter H and higher S, lower V to capture dark areas
+    
+    mask = cv2.inRange(hsv, lower_purple, upper_purple)
+    
+    # Post-processing to clean up the mask
+    # Erosion to remove small noise and separate touching objects
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.erode(mask, kernel, iterations=1)
+    
+    # Dilation to restore the shape of the remaining objects
+    mask = cv2.dilate(mask, kernel, iterations=1)
+    
+    return mask
+
+def find_bounding_boxes(mask):
+    """Finds bounding boxes for segmented regions and filters by size."""
+    # This part remains mostly the same, but the filtering is crucial now.
+    # The minimum contour area should be large enough to filter out noise,
+    # but small enough to capture individual cells or small clusters.
+    min_area = 50 
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = [cv2.boundingRect(c) for c in contours if cv2.contourArea(c) > min_area] 
+    return boxes
+
+def find_filtered_bounding_boxes(mask):
+    """
+    Finds bounding boxes for segmented regions and filters them based on
+    size and a simple shape approximation (solidity or circularity).
+    """
+    min_area = 50
+    min_solidity = 0.5  # A measure of how "filled in" the shape is
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    filtered_boxes = []
+
+    for c in contours:
+        area = cv2.contourArea(c)
+        if area > min_area:
+            # Calculate solidity as a shape filter
+            # Solidity = Contour Area / Bounding Box Area
+            hull = cv2.convexHull(c)
+            hull_area = cv2.contourArea(hull)
+            if hull_area > 0:
+                solidity = float(area) / hull_area
+                if solidity > min_solidity:
+                    x, y, w, h = cv2.boundingRect(c)
+                    filtered_boxes.append((x, y, w, h))
+    
+    return filtered_boxes
+
+def process_and_save(image_paths, annotations_dir, masks_dir):
+    """Processes images, generates annotations, and saves them."""
+    if not os.path.exists(annotations_dir): os.makedirs(annotations_dir)
+    if not os.path.exists(masks_dir): os.makedirs(masks_dir)
+
+    all_boxes_data = []
+
+    for path in image_paths:
+        img = cv2.imread(path)
+        if img is None:
+            print(f"Skipping corrupt file: {path}")
+            continue
+
+        mask = color_segmentation(img)
+        boxes = find_bounding_boxes(mask)
+
+        # Save the mask
+        mask_filename = os.path.basename(path).replace('.jp2', '.png')
+        cv2.imwrite(os.path.join(masks_dir, mask_filename), mask)
+        
+        # Save bounding box data
+        for (x, y, w, h) in boxes:
+            all_boxes_data.append({
+                'image_path': os.path.basename(path),
+                'label': 'candida',
+                'xmin': x,
+                'ymin': y,
+                'xmax': x + w,
+                'ymax': y + h
+            })
+
+        print(f"Processed {os.path.basename(path)}: found {len(boxes)} regions.")
+
+    # Save all bounding boxes to a single CSV
+    df = pd.DataFrame(all_boxes_data)
+    df.to_csv(os.path.join(annotations_dir, 'bounding_boxes.csv'), index=False)
+    print(f"Saved all bounding box data to annotations/bounding_boxes.csv")
+
+if __name__ == "__main__":
+    config = load_config()
+    data_root = config['paths']['data_root']
+    annotations_dir = os.path.join(config['paths']['annotations_dir'], 'bounding_boxes')
+    masks_dir = os.path.join(config['paths']['annotations_dir'], 'masks')
+    
+    print("Starting automated annotation via color-based segmentation...")
+    all_images = get_image_paths(data_root)
+    
+    process_and_save(all_images, annotations_dir, masks_dir)
+    print("Automated annotation complete.")
+
+    # Optional: Visualize a sample to check results
+    sample_path = all_images[0]
+    img = cv2.imread(sample_path)
+    mask = cv2.imread(os.path.join(masks_dir, os.path.basename(sample_path).replace('.jp2', '.png')))
+    
+    plt.figure(figsize=(10, 5))
+    plt.subplot(1, 2, 1)
+    plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    plt.title("Original Image")
+    plt.subplot(1, 2, 2)
+    plt.imshow(mask, cmap='gray')
+    plt.title("Generated Mask")
+    plt.show()

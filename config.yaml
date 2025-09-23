@@ -1,0 +1,22 @@
+paths:
+  data_root: "data/"
+  annotations_dir: "annotations/"
+  results_dir: "results/"
+
+  # Annotation specific paths
+  annotation_tool_output: "annotations/bounding_boxes/"
+  
+  # Segmentation specific paths
+  segmented_images_dir: "results/segmented_images/"
+
+  # Classification specific paths
+  classification_labels_csv: "results/classification_results/classification_labels.csv"
+
+segmentation:
+  method: "color_based" # or "deep_learning"
+  color_space: "HSV"
+  threshold_value: 100
+
+classification:
+  model: "RandomForest"
+  features: ["color_moments", "texture_features"]
