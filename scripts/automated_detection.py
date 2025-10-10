@@ -10,7 +10,8 @@ from datetime import datetime
 
 # Import functions from other scripts
 import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'src', 'classification'))
+from morphology_classifier import CandidaMorphologyClassifier
 
 def load_config(config_path="config.yaml"):
     """Loads configuration from a YAML file."""
@@ -47,7 +48,7 @@ def color_segmentation(image):
 def find_bounding_boxes(mask, min_area=50, min_solidity=0.5):
     """Finds bounding boxes for segmented regions with filtering."""
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    filtered_boxes = []
+    filtered_contours = []
 
     for contour in contours:
         area = cv2.contourArea(contour)
@@ -58,10 +59,9 @@ def find_bounding_boxes(mask, min_area=50, min_solidity=0.5):
             if hull_area > 0:
                 solidity = float(area) / hull_area
                 if solidity > min_solidity:
-                    x, y, w, h = cv2.boundingRect(contour)
-                    filtered_boxes.append((x, y, w, h))
+                    filtered_contours.append(contour)
     
-    return filtered_boxes
+    return filtered_contours
 
 class CandidaDetector:
     """
@@ -75,6 +75,7 @@ class CandidaDetector:
             'min_solidity': 0.5,
             'confidence_threshold': 0.7
         }
+        self.classifier = CandidaMorphologyClassifier()
         
     def detect_single_image(self, image_path, save_visualization=False, output_dir=None):
         """
@@ -97,8 +98,8 @@ class CandidaDetector:
             # Perform segmentation
             mask = color_segmentation(image)
             
-            # Find bounding boxes
-            boxes = find_bounding_boxes(
+            # Find contours
+            contours = find_bounding_boxes(
                 mask, 
                 min_area=self.detection_params['min_area'],
                 min_solidity=self.detection_params['min_solidity']
@@ -108,7 +109,10 @@ class CandidaDetector:
             image_name = os.path.basename(image_path)
             detections = []
             
-            for i, (x, y, w, h) in enumerate(boxes):
+            for i, contour in enumerate(contours):
+                x, y, w, h = cv2.boundingRect(contour)
+                morphology = self.classifier.classify(contour)
+                
                 detections.append({
                     'detection_id': i + 1,
                     'xmin': x,
@@ -118,7 +122,8 @@ class CandidaDetector:
                     'width': w,
                     'height': h,
                     'area': w * h,
-                    'confidence': 0.95  # High confidence for rule-based detection
+                    'confidence': 0.95,  # High confidence for rule-based detection
+                    'morphology': morphology
                 })
             
             results = {
@@ -131,7 +136,7 @@ class CandidaDetector:
             
             # Save visualization if requested
             if save_visualization and output_dir:
-                self._save_visualization(image, mask, boxes, image_name, output_dir)
+                self._save_visualization(image, mask, contours, image_name, output_dir)
             
             return results
             
@@ -198,7 +203,10 @@ class CandidaDetector:
         
         total_detections = sum(r['detection_count'] for r in all_results)
         print(f"Total Candida regions detected: {total_detections}")
-        print(f"Average detections per image: {total_detections/successful_detections:.2f}")
+        if successful_detections > 0:
+            print(f"Average detections per image: {total_detections/successful_detections:.2f}")
+        else:
+            print("Average detections per image: 0.00")
         
         # Save results
         if output_dir:
@@ -206,7 +214,7 @@ class CandidaDetector:
         
         return all_results
     
-    def _save_visualization(self, image, mask, boxes, image_name, output_dir):
+    def _save_visualization(self, image, mask, contours, image_name, output_dir):
         """Save visualization of detection results."""
         viz_dir = os.path.join(output_dir, 'visualizations')
         os.makedirs(viz_dir, exist_ok=True)
@@ -226,13 +234,14 @@ class CandidaDetector:
         
         # Image with detections
         image_with_boxes = image.copy()
-        for i, (x, y, w, h) in enumerate(boxes):
+        for i, contour in enumerate(contours):
+            x, y, w, h = cv2.boundingRect(contour)
             cv2.rectangle(image_with_boxes, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv2.putText(image_with_boxes, f'C{i+1}', (x, y-10), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         
         axes[2].imshow(cv2.cvtColor(image_with_boxes, cv2.COLOR_BGR2RGB))
-        axes[2].set_title(f'Detections ({len(boxes)} regions)')
+        axes[2].set_title(f'Detections ({len(contours)} regions)')
         axes[2].axis('off')
         
         # Save visualization
@@ -273,7 +282,8 @@ class CandidaDetector:
                         'width': detection['width'],
                         'height': detection['height'],
                         'area': detection['area'],
-                        'confidence': detection['confidence']
+                        'confidence': detection['confidence'],
+                        'morphology': detection.get('morphology', 'Unknown')
                     }
                     csv_data.append(csv_row)
         
@@ -329,7 +339,8 @@ def main():
             print(f"Found {result['detection_count']} Candida regions")
             for i, detection in enumerate(result['detections']):
                 print(f"  Detection {i+1}: Area={detection['area']} px², "
-                      f"Position=({detection['xmin']},{detection['ymin']})")
+                      f"Position=({detection['xmin']},{detection['ymin']}), "
+                      f"Morphology={detection.get('morphology', 'Unknown')}")
     
     elif os.path.isdir(args.input):
         print(f"Processing directory: {args.input}")
