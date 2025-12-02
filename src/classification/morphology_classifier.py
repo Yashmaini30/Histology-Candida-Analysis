@@ -100,6 +100,17 @@ class CandidaMorphologyClassifier:
             'area', 'perimeter', 'aspect_ratio', 'solidity', 
             'extent', 'circularity', 'eccentricity', 'compactness'
         ]
+        # Optional SVM verifier (calibrated) to resolve 'unknown' rule outputs
+        self.svm_verifier = None
+        self.svm_prob_threshold = 0.60
+        # Try to load a verifier if present next to this module
+        default_svm_path = os.path.join(os.path.dirname(__file__), 'svm_verifier.pkl')
+        if os.path.exists(default_svm_path):
+            try:
+                self.load_svm_model(default_svm_path)
+                print(f'Loaded SVM verifier from {default_svm_path}')
+            except Exception:
+                print(f'Failed to load SVM verifier from {default_svm_path}')
         
     def classify_by_rules(self, features):
         """
@@ -134,7 +145,49 @@ class CandidaMorphologyClassifier:
         if features is None:
             return 'unknown'
         
-        return self.classify_by_rules(features)
+        rule_result = self.classify_by_rules(features)
+        # If rules are inconclusive, use SVM verifier (if available)
+        if rule_result == 'unknown' and self.svm_verifier is not None:
+            try:
+                svm_pred, svm_conf = self.apply_svm_verifier(features)
+                if svm_conf >= self.svm_prob_threshold:
+                    return svm_pred
+            except Exception:
+                pass
+
+        return rule_result
+
+    def load_svm_model(self, filepath):
+        """Load a joblib-trained calibrated SVM verifier"""
+        self.svm_verifier = joblib.load(filepath)
+
+    def apply_svm_verifier(self, features):
+        """Apply the loaded SVM verifier to a single features dict.
+
+        Returns (prediction, confidence).
+        """
+        if self.svm_verifier is None:
+            raise RuntimeError('SVM verifier not loaded')
+
+        # Assemble feature vector in the same order used for training
+        x = np.array([features.get(n, 0.0) for n in self.feature_names], dtype=float).reshape(1, -1)
+        # Apply log transform to area as used in training
+        try:
+            x[0, 0] = np.log1p(x[0, 0])
+        except Exception:
+            pass
+
+        probs = None
+        try:
+            probs = self.svm_verifier.predict_proba(x)[0]
+            pred_idx = int(np.argmax(probs))
+            pred = self.svm_verifier.classes_[pred_idx]
+            conf = float(probs[pred_idx])
+            return pred, conf
+        except Exception:
+            # fallback to hard predict
+            pred = self.svm_verifier.predict(x)[0]
+            return pred, 0.0
     
     def prepare_training_data(self, image_dir, mask_dir, detection_csv):
         """
@@ -271,6 +324,14 @@ class CandidaMorphologyClassifier:
                         ml_class = self.classifier.predict(feature_vector)[0]
                     except:
                         pass
+                    # SVM verifier (if present)
+                    svm_class = 'unknown'
+                    svm_confidence = 0.0
+                    try:
+                        if self.svm_verifier is not None:
+                            svm_class, svm_confidence = self.apply_svm_verifier(features)
+                    except Exception:
+                        pass
                     
                     result = {
                         'image_name': image_name,
@@ -279,6 +340,8 @@ class CandidaMorphologyClassifier:
                         'xmax': row['xmax'], 'ymax': row['ymax'],
                         'rule_based_classification': rule_based_class,
                         'ml_classification': ml_class,
+                        'svm_classification': svm_class,
+                        'svm_confidence': svm_confidence,
                         **features
                     }
                     
